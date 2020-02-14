@@ -9,6 +9,7 @@ autoupdate="1"
 containerrestart="0"			# load new images and resart corresponding containers if =1
 nobackup="0"				# do not create backup if =1
 nolog="0"				# do not create log if =1
+nonstable="0"                           # include non stabel versions (rc, beta...) if=1
 date=$(date +"%Y.%m.%d_%H:%M:%S")	# current date during start
 
 # compare two versions, return values:
@@ -17,17 +18,28 @@ date=$(date +"%Y.%m.%d_%H:%M:%S")	# current date during start
 #  2 : $1 < $2
 #  3 : $1 and $2 have different details 
 #  4 : $1 and $2 are not coperable
+#  5 : $2 is not a stable version
 # -1 : something went wrong
 vercomp () {
+   # Version is the same
    if [[ $1 == $2 ]]
    then
       return 0
    fi
-    
+
+   # Version contains specific strings marking them as not stable    
+   if [[ "$nonstable" != "1" ]]; then 
+      if [[ "$2" =~ "beta" || "$2" =~ "rc" || "$2" =~ "snapshot" || "$2" =~ "nightly" ]]; then
+         return 5
+      fi
+   fi
+  
+   # iterate over every part of the tag seperated by .
    for i in {1..6}; do
       p1=$(echo $1 | cut -d "." -f$i -s)
       p2=$(echo $2 | cut -d "." -f$i -s)
 
+      # only for the first round, check whether the parameter are "" to avoid errors 
       if [[ "$i" == "1" ]]; then
          if [[ "$p1" == "" ]]; then
             p1=$1
@@ -36,19 +48,21 @@ vercomp () {
             p2=$2
          fi
       fi
- 
+
+      # check whether one of the parameters is empty, if yes they are of different detail 
       if [[ "$p1" == "" || "$p2" == "" ]]; then
          return 3
       fi
 
+      # check for TODO 
       if [[ $(echo $p1 | grep -o "[a-zA-Z]" | wc -l) != $(echo $p2 | grep -o "[a-zA-Z]" | wc -l) ]]; then
          return 4
       fi
 
+      # compare the curent version parts
       if [[ $(($p1)) -gt $(($p2)) ]]; then
          return 1
       fi
-
       if [[ "$p1" -lt "$p2" ]]; then
          return 2
       fi
@@ -102,19 +116,19 @@ output () {
 createlog () {
    if [[ "$nolog" != "1" ]]; then
       echo "" >> "$logpath"
-      output "Log file:                    $logpath"
+      output "Log file:                     $logpath"
    else
-      output "Log file:                    no log file"
+      output "Log file:                     no log file"
    fi
 }
 
 backup () {
    if [[ "$mode" != "0" ]]; then
-      output "Backup of current file:      no backup"
+      output "Backup of current file:       no backup"
       return
    fi
    if [[ "$nobackup" == "1" ]]; then
-      output "Backup of current file:      no backup"
+      output "Backup of current file:       no backup"
       return
    fi
    output "Backup of current file:      $(realpath "$dir/history/$name-$date")"
@@ -123,6 +137,15 @@ backup () {
 
 docker-compose-up () {
    if [[ "$containerrestart" == "1" ]]; then
+      if [ "$EUID" -ne 0 ]; then
+         # script is not run as root
+         id -nG "$USER" | grep -qw "docker"
+         if [ $? -eq 1 ]; then 
+            # user is not part of the group 'docker', command will most likely fail
+            output "\033[1;31mERROR: \033[0mRestart of containers not possible. Please run script as root."
+            return
+         fi
+      fi
       output "Load new images and restart corresponding containers..."
       docker-compose -f "$path" up -d
    else
@@ -143,9 +166,11 @@ check () {
       fi
    
       tag=$(echo $container | cut -d":" -f2)
-#      if [[ "$link" == "library/mysql" ]]; then
-#         tag="5.0.0"
-#      fi
+
+      if [[ "$link" =~ "$tag" ]] && [[ "$container" != *":"* ]]; then
+         output "$link \033[1;31mMissing tag\033[0m"
+         continue
+      fi
 
       output "$link \033[1;34m$tag\033[0m"
 
@@ -158,6 +183,7 @@ check () {
 
          vercomp $tag $t
          e="$?"      
+
 
          # Verbose level 4 - print all tags (max latest 100 tags)
          if [[ "$mode" == "4" ]]; then 
@@ -274,24 +300,26 @@ print_usage () {
    echo "  check4updates.sh [options]"
    echo
    echo "Options:"
-   echo "  -f <file> Specify the DOCKER COMPOSE FILE." 
-   echo "               Default: ./docker-compose.yml"
-   echo -e "  -m <mode> Specify the MODE. The output is color encoded: \033[1;32mnewer\033[0m \033[1;31molder\033[0m \033[1;34mequal\033[0m \033[1;35mnot comparable\033[0m"
-   echo "               Mode 0: list the newest tag for every major release. Used to update tags."
-   echo "               Mode 1: list only the newest tag. (Does not fit the tag detail necessarily.)"
-   echo "               Mode 2: list every tag that is newer than the current one."
-   echo "               Mode 3: list every tag that is newer than the current one or equal."
-   echo "               Mode 4: list the last 100 tags available on docker hub."
-   echo "               Default: 0"
-   echo "  -b        Create NO BACKUP of the docker compose file."
-   echo "               Default: off"
-   echo "  -l        Create NO LOG."
-   echo "               Default: off"
-   echo "  -u	    NO UPDATE of tags in docker compose file. Only with Mode 0."
-   echo "               Default: off"
-   echo "  -r 	    RESTART containers by loading new images an restart correspoding containers."
-   echo "               Default: off"
-   echo "  -h        Print this HELP."
+   echo "  -f <file>    Specify the DOCKER COMPOSE FILE." 
+   echo "                  Default: ./docker-compose.yml"
+   echo -e "  -m <mode>    Specify the MODE. The output is color encoded: \033[1;32mnewer\033[0m \033[1;31molder\033[0m \033[1;34mequal\033[0m \033[1;35mnot comparable\033[0m"
+   echo "                  Mode 0: list the newest tag for every major release. Used to update tags."
+   echo "                  Mode 1: list only the newest tag. (Does not fit the tag detail necessarily.)"
+   echo "                  Mode 2: list every tag that is newer than the current one."
+   echo "                  Mode 3: list every tag that is newer than the current one or equal."
+   echo "                  Mode 4: list the last 100 tags available on docker hub."
+   echo "                  Default: 0"
+   echo "  -b           Create NO BACKUP of the docker compose file."
+   echo "                  Default: off"
+   echo "  -l           Create NO LOG."
+   echo "                  Default: off"
+   echo "  -u	        NO UPDATE of tags in docker compose file. Only with Mode 0."
+   echo "                  Default: off"
+   echo "  -r 	        RESTART containers by loading new images an restart correspoding containers."
+   echo "                  Default: off"
+   echo "  -s           Include NON STABLE versions containing 'rc', 'beta' or similar."
+   echo "                  Default: off"
+   echo "  -h           Print this HELP."
    echo
    echo "Examples:"
    echo "  check4updates.sh -u"
@@ -312,18 +340,23 @@ setup () {
 }
 
 printheader () {
-   output "Current time:                $date"
-   output "Docker-Compose file:         $path"
-   output "Mode:                        $mode"
+   output "Current time:                 $date"
+   output "Docker-Compose file:          $path"
+   output "Mode:                         $mode"
    if [[ "$autoupdate" == "1" ]]; then
-      output "Update tags:                 yes"
+      output "Update tags:                  yes"
    else
-      output "Update tags:                 no"
+      output "Update tags:                  no"
    fi
    if [[ "$containerrestart" == "1" ]]; then
-      output "Load and restart container:  yes"
+      output "Load and restart container:   yes"
    else
-      output "Load and restart container:  no"
+      output "Load and restart container:   no"
+   fi
+   if [[ "$nonstable" == "1" ]]; then
+      output "Include non stable versions:  yes"
+   else
+      output "Include non stable versions:  no"
    fi
 }
 
@@ -341,8 +374,61 @@ main () {
    output "#--------------------- End ---------------------#"
 }
 
+testcomp () {
+   echo "Testmode:"
+   #nonstable="1"
 
-while getopts 'f:m:blurh' flag; do
+   for l in $(cat version-tests.txt); do
+      name=$(echo $l | cut -d "|" -f1)
+      current=$(echo $l | cut -d "|" -f2)
+      #current="12.2.13-ce.0"
+      tag=$(echo $l | cut -d "|" -f3)
+      state=$(echo $l | cut -d "|" -f4)
+
+      if [[ "$name" == "break" ]]; then
+         break
+      fi
+
+
+# compare two versions, return values:
+#  0 : versions are idetical
+#  1 : $1 > $2
+#  2 : $1 < $2
+#  3 : $1 and $2 have different details 
+#  4 : $1 and $2 are not coperable
+#  5 : $2 is not a stable version
+# -1 : something went wrong
+
+      vercomp $current $tag
+      e="$?"
+     
+      #if [[ "$e" == "$state" ]]; then
+      #   continue
+      #fi
+ 
+      case "$e" in
+         # $current = $tag
+         0) echo -e "$name   $current   \033[1;34m      =       \033[0m   $tag" ;;
+         # $current > $tag
+         1) echo -e "$name   $current   \033[1;31m      >       \033[0m   $tag" ;;
+         # $current < $tag
+         2) echo -e "$name   $current   \033[1;32m      <       \033[0m   $tag" ;;
+         # $current ~ $tag
+         3) echo -e "$name   $current   \033[1;34m      ~       \033[0m   $tag" ;;
+         # default, not comparable or error
+         4) echo -e "$name   $current   \033[1;35mnot comparable\033[0m   $tag" ;;
+         # default, not comparable or error
+         5) echo -e "$name   $current   \033[1;35m  not stable  \033[0m   $tag" ;;
+         # default, not comparable or error
+         *) echo -e "$name   $current   \033[1;35m    error     \033[0m   $tag" ;;
+      esac
+      
+   done
+
+}
+
+
+while getopts 'f:m:blursth' flag; do
    case "${flag}" in
      f) path="${OPTARG}" ;;
      m) mode="${OPTARG}" ;;
@@ -350,6 +436,9 @@ while getopts 'f:m:blurh' flag; do
      l) nolog="1" ;;
      u) autoupdate="0" ;;
      r) containerrestart="1" ;;
+     s) nonstable="1" ;;
+     t) testcomp
+        exit 0 ;;
      h) print_usage
         exit 1 ;;
      *) print_usage
